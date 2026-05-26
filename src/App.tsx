@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { toDataURL } from 'qrcode';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, BarChart, Bar, Legend
 } from 'recharts';
@@ -58,6 +59,202 @@ export default function App() {
     { id: 'strategy', label: 'Implementation Strategy', icon: Target },
     { id: 'auction', label: 'B2B Plastics Auction', icon: Gavel },
   ];
+
+  const accessKey = '900900';
+  const reservePrice = 280;
+
+  const [adminKey, setAdminKey] = useState('');
+  const [isAdminAuthorized, setIsAdminAuthorized] = useState(false);
+  const [auctionStarted, setAuctionStarted] = useState(false);
+  const [auctionEnded, setAuctionEnded] = useState(false);
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState('');
+  const [joinCode, setJoinCode] = useState('');
+  const [externalJoinToken, setExternalJoinToken] = useState('');
+  const [participants, setParticipants] = useState<Array<{ id: string; name: string; email: string; zone: string; bid: number }>>([]);
+  const [bidHistory, setBidHistory] = useState<Array<{ company: string; amount: number; time: number }>>([]);
+  const [companyNameInput, setCompanyNameInput] = useState('');
+  const [bidAmountInput, setBidAmountInput] = useState('');
+  const [companyEmailInput, setCompanyEmailInput] = useState('');
+  const [companyZoneInput, setCompanyZoneInput] = useState('');
+  const [auctionMessage, setAuctionMessage] = useState('Enter the admin access key to start a secure auction.');
+  const [lastActivity, setLastActivity] = useState(Date.now());
+  const [winner, setWinner] = useState<{ company: string; amount: number; margin: number } | null>(null);
+
+  const highestBid = participants.reduce((max, participant) => Math.max(max, participant.bid), 0);
+  const currentWinner = participants.find((participant) => participant.bid === highestBid && highestBid > 0) ?? null;
+
+  const updateAuctionMessage = (message: string) => {
+    setAuctionMessage(message);
+  };
+
+  const authorizeAdmin = () => {
+    if (adminKey.trim() === accessKey) {
+      setIsAdminAuthorized(true);
+      updateAuctionMessage('Admin access granted. Start the auction to generate the QR code and invite companies.');
+    } else {
+      updateAuctionMessage('Invalid access key. Use 900900 to manage this auction.');
+    }
+  };
+
+  const concludeAuction = () => {
+    if (!auctionStarted || auctionEnded) return;
+    setAuctionEnded(true);
+    setAuctionStarted(false);
+    setAuctionMessage('Auction has ended. The highest bidder wins unless there were no qualified bids.');
+
+    if (currentWinner) {
+      const margin = Math.max(0, currentWinner.bid - reservePrice);
+      setWinner({ company: currentWinner.name, amount: currentWinner.bid, margin });
+      updateAuctionMessage(`${currentWinner.name} won the auction with $${currentWinner.bid.toFixed(2)} / ton.`);
+    } else {
+      setWinner(null);
+      updateAuctionMessage('No eligible bids were received. Auction concluded without a winner.');
+    }
+  };
+
+  useEffect(() => {
+    if (!auctionStarted || auctionEnded) return;
+
+    const interval = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - lastActivity) / 1000);
+
+      if (currentWinner && currentWinner.bid >= reservePrice * 2) {
+        updateAuctionMessage('100% profit reached. Closing the auction to secure the plastics sale.');
+        concludeAuction();
+      } else if (participants.length === 1 && elapsed >= 12) {
+        updateAuctionMessage('Single bid held for 12 seconds with no competing offer. Closing the auction.');
+        concludeAuction();
+      }
+    }, 250);
+
+    return () => window.clearInterval(interval);
+  }, [auctionStarted, auctionEnded, lastActivity, currentWinner, participants.length]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    if (!token) return;
+
+    setExternalJoinToken(token);
+    setActiveTab('auction');
+    updateAuctionMessage('Join token detected. Use the auction form to register and place your bid.');
+  }, []);
+
+  const startAuction = async () => {
+    if (!isAdminAuthorized) {
+      updateAuctionMessage('You must authorize as admin before starting the auction.');
+      return;
+    }
+
+    const token = `auction-${Date.now()}`;
+    setJoinCode(token);
+    setAuctionStarted(true);
+    setAuctionEnded(false);
+    setBidHistory([]);
+    setParticipants([]);
+    setWinner(null);
+
+    const payload = typeof window !== 'undefined'
+      ? `${window.location.origin}/auction/join?token=${token}`
+      : `auction://join?token=${token}`;
+
+    try {
+      const qr = await toDataURL(payload, {
+        margin: 1,
+        width: 260,
+        color: { dark: '#10B981', light: '#f8fafc' },
+      });
+      setQrCodeDataUrl(qr);
+      setLastActivity(Date.now());
+      updateAuctionMessage('Auction started. QR join code is live; sale closes at 100% profit or after one bid remains unchallenged for 12 seconds.');
+    } catch (error) {
+      setQrCodeDataUrl('');
+      updateAuctionMessage('Failed to generate QR code. Try again or refresh the page.');
+    }
+  };
+
+  const handleJoinCompany = () => {
+    if (!auctionStarted && !externalJoinToken) {
+      updateAuctionMessage('Start the auction first. The QR code must be active before companies can join.');
+      return;
+    }
+    if (!companyNameInput || !companyEmailInput || !companyZoneInput) {
+      updateAuctionMessage('Please fill company name, email, and target zone to join the auction.');
+      return;
+    }
+
+    setParticipants((prev) => {
+      const existing = prev.find((company) => company.email === companyEmailInput.trim().toLowerCase());
+      if (existing) {
+        updateAuctionMessage(`${companyNameInput} is already joined. You can place a bid now.`);
+        return prev;
+      }
+
+      return [
+        ...prev,
+        {
+          id: `${companyNameInput.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`,
+          name: companyNameInput.trim(),
+          email: companyEmailInput.trim().toLowerCase(),
+          zone: companyZoneInput,
+          bid: 0,
+        },
+      ];
+    });
+
+    setLastActivity(Date.now());
+    updateAuctionMessage(`${companyNameInput} has joined the auction. Ready to place the first bid.`);
+  };
+
+  const handleSubmitBid = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!auctionStarted && !externalJoinToken) {
+      updateAuctionMessage('Auction is not live locally. Scan the QR again from the admin device or start the auction.');
+      return;
+    }
+
+    const amount = Number(bidAmountInput);
+    if (!companyNameInput || !companyEmailInput || !companyZoneInput) {
+      updateAuctionMessage('Please enter company details and select a target zone before bidding.');
+      return;
+    }
+    if (!amount || amount <= highestBid) {
+      updateAuctionMessage(`Bids must be higher than the current top bid of $${highestBid.toFixed(2)}.`);
+      return;
+    }
+
+    const normalizedEmail = companyEmailInput.trim().toLowerCase();
+    setParticipants((prev) => {
+      const existing = prev.find((company) => company.email === normalizedEmail);
+      if (existing) {
+        return prev.map((company) =>
+          company.email === normalizedEmail ? { ...company, bid: amount } : company
+        );
+      }
+      return [
+        ...prev,
+        {
+          id: `${companyNameInput.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`,
+          name: companyNameInput.trim(),
+          email: normalizedEmail,
+          zone: companyZoneInput,
+          bid: amount,
+        },
+      ];
+    });
+
+    setBidHistory((prev) => [
+      ...prev,
+      { company: companyNameInput.trim(), amount, time: Date.now() },
+    ]);
+
+    setBidAmountInput('');
+    setLastActivity(Date.now());
+    updateAuctionMessage(`${companyNameInput.trim()} placed a leading bid of $${amount.toFixed(2)} / ton.`);
+  };
 
   return (
     <div className="flex h-screen bg-[#0A0B0E] font-sans text-[#E2E8F0] overflow-hidden">
@@ -505,138 +702,275 @@ export default function App() {
                 className="space-y-8 flex flex-col min-h-[calc(100vh-100px)]"
               >
                 <header className="mb-4 border-b border-[#2D323A] pb-8">
-                  <div className="flex items-center gap-3 mb-2">
-                    <Gavel className="text-[#10B981] w-8 h-8" />
-                    <h2 className="text-4xl font-light tracking-tight">Plastic Auction</h2>
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                    <div>
+                      <div className="flex items-center gap-3 mb-2">
+                        <Gavel className="text-[#10B981] w-8 h-8" />
+                        <h2 className="text-4xl font-light tracking-tight">B2B Plastics Auction</h2>
+                      </div>
+                      <p className="text-lg text-[#94A3B8] max-w-3xl leading-relaxed">
+                        Secure admin access, generate a QR join code, and manage live bidding with automatic auction close behavior.
+                      </p>
+                    </div>
+                    <div className="rounded-sm border border-[#2D323A] bg-[#0A0B0E] p-4 text-sm text-[#94A3B8]">
+                      <div className="mb-2 uppercase tracking-[0.3em] text-[#64748B]">Auction Close Rule</div>
+                      <div className="text-[#E2E8F0]">Automatically closes on 100% profit</div>
+                      <div className="text-[#10B981] mt-2">Or after one unchallenged bid remains for 12 seconds</div>
+                    </div>
                   </div>
-                  <p className="text-lg text-[#10B981] font-mono tracking-widest uppercase text-xs">
-                    Bid for Sustainable Plastic Solutions
-                  </p>
                 </header>
 
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 flex-1">
-                  
-                  {/* Left Column: Availability & Footer (7 cols) */}
-                  <div className="lg:col-span-7 flex flex-col gap-8">
-                    <section className="bg-[#161920] border border-[#2D323A] p-6 rounded-sm">
-                      <h3 className="text-xs font-mono text-[#64748B] uppercase tracking-widest mb-6">Current Availability (Daily Yield)</h3>
-                      <p className="text-sm text-[#94A3B8] mb-6 leading-relaxed">
-                        The plastic yield listed below is collected directly from local civic amenities and smart sorting hubs located across Mysore. Our smart bins guarantee minimal contamination.
-                      </p>
-                      
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        {[
-                          { area: 'Kuvempunagar', yield: '0.75 tons/day', source: 'Residential Drop-offs' },
-                          { area: 'JP Nagar', yield: '1.5 tons/day', source: 'Commercial Zones & Schools' },
-                          { area: 'Vijayanagar', yield: '1.3 tons/day', source: 'High-density Smart Bins' },
-                          { area: 'Gokulam', yield: '0.75 tons/day', source: 'Awareness Campaign Centers' }
-                        ].map(loc => (
-                          <div key={loc.area} className="bg-[#0A0B0E] border border-[#2D323A] p-4 rounded-sm flex flex-col gap-1">
-                            <div className="flex justify-between items-start mb-2">
-                              <h4 className="font-medium text-[#E2E8F0]">{loc.area}</h4>
-                              <span className="text-xs text-[#10B981] bg-[#10B981]/10 px-2 py-0.5 rounded-sm font-mono border border-[#10B981]/20">{loc.yield}</span>
-                            </div>
-                            <div className="flex items-center gap-2 text-xs text-[#64748B]">
-                              <MapPin size={12}/>
-                              <span>{loc.source}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-
-                    <section className="bg-[#161920] border border-[#10B981]/30 p-6 rounded-sm relative overflow-hidden flex-1 flex flex-col min-h-[300px]">
-                      <div className="absolute top-0 right-0 p-4 opacity-5 pointer-events-none">
-                        <MessageSquare size={120} />
-                      </div>
-                      <h3 className="text-xs font-mono text-[#10B981] uppercase tracking-widest mb-4">Direct Negotiation</h3>
-                      <p className="text-sm text-[#94A3B8] mb-4">
-                        We believe in transparent pricing. Engage directly with our representatives to discuss volume discounts, long-term contracts, and counter-offers in real-time.
-                      </p>
-
-                      <div className="bg-[#0A0B0E] border border-[#2D323A] rounded-sm flex flex-col flex-1 h-full min-h-[220px]">
-                        <div className="flex-1 p-4 overflow-y-auto space-y-4">
-                          <div className="flex gap-3">
-                            <div className="w-8 h-8 rounded-sm bg-[#1A1E26] flex items-center justify-center shrink-0">
-                              <Building size={14} className="text-[#64748B]" />
-                            </div>
-                            <div className="bg-[#1A1E26] text-sm text-[#E2E8F0] p-3 rounded-sm rounded-tl-none border border-[#2D323A]">
-                              We are interested in a 6-month contract for JP Nagar's LDPE. Can we negotiate a bulk rate?
-                            </div>
-                          </div>
-                          <div className="flex gap-3 flex-row-reverse">
-                            <div className="w-8 h-8 rounded-sm bg-[#10B981]/10 flex items-center justify-center shrink-0 border border-[#10B981]/20">
-                              <Recycle size={14} className="text-[#10B981]" />
-                            </div>
-                            <div className="bg-[#10B981]/10 text-sm text-[#E2E8F0] p-3 rounded-sm rounded-tr-none border border-[#10B981]/20">
-                              Absolutely. For a 6-month commitment, we can secure the 1.5 tons/day at a 12% discount off spot price. Please submit an official bid using the form, and denote 'Long-Term' in the notes.
-                            </div>
-                          </div>
+                <div className="grid grid-cols-1 xl:grid-cols-[1.8fr_1fr] gap-8 flex-1">
+                  <div className="space-y-6">
+                    <Card className="p-6 border border-[#2D323A]">
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.3em] text-[#64748B] mb-2">Admin Control</p>
+                          <h3 className="text-2xl font-normal text-[#E2E8F0]">Secure Auction Access</h3>
+                          <p className="text-sm text-[#94A3B8] mt-3">Enter the admin access key to generate the auction QR code and manage participation.</p>
                         </div>
-                        <div className="p-3 border-t border-[#2D323A] flex gap-2">
-                          <input type="text" placeholder="Type your message..." className="flex-1 bg-[#1A1E26] border border-[#2D323A] rounded-sm px-3 text-sm text-[#E2E8F0] focus:outline-none focus:border-[#10B981] transition-colors" />
-                          <button className="bg-[#1A1E26] hover:bg-[#10B981]/20 text-[#10B981] border border-[#2D323A] hover:border-[#10B981]/50 p-2 text-sm rounded-sm transition-colors">
-                            <Send size={16} />
+                        <div className="flex flex-col gap-3 w-full sm:w-[320px]">
+                          <div className="relative">
+                            <input
+                              value={adminKey}
+                              onChange={(event) => setAdminKey(event.target.value)}
+                              placeholder="Access key"
+                              className="w-full bg-[#0A0B0E] border border-[#2D323A] rounded-sm py-3 px-4 text-sm text-[#E2E8F0] focus:outline-none focus:border-[#10B981]"
+                              type="password"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={authorizeAdmin}
+                            className="w-full bg-[#10B981] text-[#0A0B0E] py-3 rounded-sm font-medium hover:bg-[#059669] transition-colors"
+                          >
+                            Unlock Admin
                           </button>
                         </div>
                       </div>
-                    </section>
-                  </div>
 
-                  {/* Right Column: Bidding Form (5 cols) */}
-                  <div className="lg:col-span-5 flex flex-col gap-6">
-                    <section className="bg-[#161920] border border-[#2D323A] p-6 rounded-sm flex-1 flex flex-col min-h-full">
-                      <h3 className="text-xs font-mono text-[#64748B] uppercase tracking-widest mb-2">Submit Official Bid</h3>
-                      <p className="text-[11px] text-[#94A3B8] mb-6">Highest bidder will secure the plastic batch. Note: Environmental verification required.</p>
-                      
-                      <form className="space-y-4 flex flex-col flex-1" onSubmit={(e) => e.preventDefault()}>
-                        <div className="space-y-1">
-                          <label className="text-[10px] uppercase font-mono text-[#64748B]">Company Name</label>
-                          <div className="relative">
-                             <Building className="absolute left-3 top-3.5 text-[#64748B] w-4 h-4" />
-                             <input type="text" className="w-full bg-[#0A0B0E] border border-[#2D323A] text-sm text-[#E2E8F0] rounded-sm py-3 pl-10 pr-4 focus:outline-none focus:border-[#10B981] transition-colors" placeholder="Acme Eco Bricks Ltd." />
+                      <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="rounded-sm border border-[#2D323A] bg-[#0A0B0E] p-4">
+                          <p className="text-xs uppercase tracking-[0.3em] text-[#64748B] mb-2">Auction Status</p>
+                          <div className="flex items-center gap-3">
+                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${auctionEnded ? 'bg-red-500/10 text-red-400' : auctionStarted ? 'bg-emerald-500/10 text-emerald-300' : 'bg-slate-700/50 text-slate-400'}`}>
+                              {auctionEnded ? 'Ended' : auctionStarted ? 'Live' : 'Pending'}
+                            </span>
+                            <span className="text-sm text-[#94A3B8]">{auctionMessage}</span>
+                          </div>
+
+                          <div className="mt-4 text-sm text-[#94A3B8] space-y-2">
+                            <p><span className="font-semibold text-[#E2E8F0]">Top bid:</span> ${highestBid.toFixed(2)}</p>
+                            <p><span className="font-semibold text-[#E2E8F0]">Current leader:</span> {currentWinner ? currentWinner.name : 'No bids yet'}</p>
                           </div>
                         </div>
 
-                        <div className="space-y-1">
-                          <label className="text-[10px] uppercase font-mono text-[#64748B]">Bid Amount (per Ton)</label>
-                          <div className="relative">
-                             <span className="absolute left-4 top-3.5 text-[#64748B] text-sm font-mono">$</span>
-                             <input type="number" className="w-full bg-[#0A0B0E] border border-[#2D323A] text-sm text-[#E2E8F0] rounded-sm py-3 pl-10 pr-4 focus:outline-none focus:border-[#10B981] transition-colors font-mono" placeholder="0.00" />
+                        <div className="rounded-sm border border-[#2D323A] bg-[#0A0B0E] p-4 space-y-3">
+                          <button
+                            type="button"
+                            onClick={startAuction}
+                            className="w-full bg-[#10B981] text-[#0A0B0E] py-3 rounded-sm font-medium hover:bg-[#059669] transition-colors disabled:opacity-40"
+                            disabled={!isAdminAuthorized}
+                          >
+                            {auctionStarted && !auctionEnded ? 'Restart Auction' : 'Start Auction'}
+                          </button>
+                          <p className="text-[11px] text-[#64748B]">Admin key required. Once the auction is live, companies can join via QR code or the join link below.</p>
+                        </div>
+                      </div>
+                    </Card>
+
+                    <Card className="p-6 border border-[#2D323A]">
+                      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.3em] text-[#64748B] mb-2">QR Join Code</p>
+                          <h3 className="text-2xl font-normal text-[#E2E8F0]">Company Onboarding</h3>
+                          <p className="text-sm text-[#94A3B8] mt-3">Generate a QR code at auction start so companies can join automatically and submit bids.</p>
+                        </div>
+                        <div className="text-right text-xs text-[#64748B]">Join token: <span className="text-[#E2E8F0] font-semibold">{joinCode || 'pending'}</span></div>
+                      </div>
+
+                      <div className="mt-6 grid grid-cols-1 lg:grid-cols-[1fr_1.1fr] gap-6 items-center">
+                        <div className="rounded-sm border border-[#2D323A] bg-[#0A0B0E] p-4 min-h-[260px] flex items-center justify-center">
+                          {qrCodeDataUrl ? (
+                            <img src={qrCodeDataUrl} alt="Auction QR Code" className="w-56 h-56 m-auto" />
+                          ) : (
+                            <div className="text-center text-sm text-[#64748B]">
+                              QR code will appear here once the admin starts the auction.
+                            </div>
+                          )}
+                        </div>
+                        <div className="space-y-3">
+                          <div className="rounded-sm border border-[#2D323A] bg-[#0A0B0E] p-4">
+                            <p className="text-xs uppercase tracking-[0.3em] text-[#64748B] mb-2">Join Link</p>
+                            <p className="text-sm text-[#E2E8F0] break-words">{qrCodeDataUrl ? `${window.location.origin}/auction/join?token=${joinCode}` : 'Awaiting QR generation...'}</p>
                           </div>
+                          {externalJoinToken && (
+                            <div className="rounded-sm border border-[#10B981]/20 bg-[#0A0B0E] p-4 text-sm text-[#94A3B8]">
+                              <p className="text-[#E2E8F0] font-medium mb-1">Join token detected</p>
+                              <p>This device opened the auction with token <span className="font-semibold text-[#10B981]">{externalJoinToken}</span>. Complete the form below to participate.</p>
+                            </div>
+                          )}
+                          <div className="rounded-sm border border-[#2D323A] bg-[#0A0B0E] p-4">
+                            <p className="text-xs uppercase tracking-[0.3em] text-[#64748B] mb-2">Instructions</p>
+                            <ul className="space-y-2 text-sm text-[#94A3B8]">
+                              <li>1. Admin unlocks with key 900900.</li>
+                              <li>2. Start auction and share the QR code.</li>
+                              <li>3. Companies join, then place bids above the current high bid.</li>
+                            </ul>
+                          </div>
+                        </div>
+                      </div>
+                    </Card>
+
+                    <Card className="p-6 border border-[#2D323A]">
+                      <div className="flex items-center justify-between mb-4">
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.3em] text-[#64748B] mb-2">Participant Grid</p>
+                          <h3 className="text-2xl font-normal text-[#E2E8F0]">Auction Participants</h3>
+                        </div>
+                        <span className="inline-flex rounded-full bg-[#10B981]/10 px-3 py-1 text-xs text-[#10B981]">{participants.length} joined</span>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {participants.length > 0 ? participants.map((company) => (
+                          <div key={company.id} className="rounded-sm border border-[#2D323A] bg-[#0A0B0E] p-4">
+                            <div className="flex items-center justify-between mb-3">
+                              <h4 className="text-base text-[#E2E8F0] font-medium">{company.name}</h4>
+                              <span className="text-xs uppercase tracking-[0.3em] text-[#64748B]">{company.zone}</span>
+                            </div>
+                            <p className="text-sm text-[#94A3B8] mb-3">{company.email}</p>
+                            <div className="rounded-sm bg-[#161920] border border-[#2D323A] p-3 text-sm text-[#E2E8F0]">
+                              Current bid: <span className="font-semibold text-[#10B981]">${company.bid.toFixed(2)}</span>
+                            </div>
+                          </div>
+                        )) : (
+                          <div className="rounded-sm border border-dashed border-[#2D323A] bg-[#0A0B0E] p-6 text-center text-sm text-[#64748B]">
+                            No companies have joined yet. Once the auction is live, companies can scan the QR code to appear here.
+                          </div>
+                        )}
+                      </div>
+                    </Card>
+                  </div>
+
+                  <div className="space-y-6">
+                    <Card className="p-6 border border-[#2D323A]">
+                      <div className="mb-4">
+                        <p className="text-xs uppercase tracking-[0.3em] text-[#64748B] mb-2">Place Your Bid</p>
+                        <h3 className="text-2xl font-normal text-[#E2E8F0]">Bid Submission</h3>
+                        <p className="text-sm text-[#94A3B8] mt-3">New bids must be higher than the current highest bid to qualify.</p>
+                      </div>
+
+                      <form className="space-y-4" onSubmit={handleSubmitBid}>
+                        <div className="space-y-1">
+                          <label className="text-[10px] uppercase font-mono text-[#64748B]">Company Name</label>
+                          <input
+                            value={companyNameInput}
+                            onChange={(event) => setCompanyNameInput(event.target.value)}
+                            className="w-full bg-[#0A0B0E] border border-[#2D323A] rounded-sm py-3 px-4 text-sm text-[#E2E8F0] focus:outline-none focus:border-[#10B981]"
+                            placeholder="Acme Eco Bricks" type="text"
+                          />
                         </div>
 
                         <div className="space-y-1">
                           <label className="text-[10px] uppercase font-mono text-[#64748B]">Contact Email</label>
-                          <div className="relative">
-                             <Mail className="absolute left-3 top-3.5 text-[#64748B] w-4 h-4" />
-                             <input type="email" className="w-full bg-[#0A0B0E] border border-[#2D323A] text-sm text-[#E2E8F0] rounded-sm py-3 pl-10 pr-4 focus:outline-none focus:border-[#10B981] transition-colors" placeholder="procurement@company.com" />
-                          </div>
+                          <input
+                            value={companyEmailInput}
+                            onChange={(event) => setCompanyEmailInput(event.target.value)}
+                            className="w-full bg-[#0A0B0E] border border-[#2D323A] rounded-sm py-3 px-4 text-sm text-[#E2E8F0] focus:outline-none focus:border-[#10B981]"
+                            placeholder="procurement@company.com" type="email"
+                          />
                         </div>
 
                         <div className="space-y-1">
-                          <label className="text-[10px] uppercase font-mono text-[#64748B]">Target Availability Zone</label>
-                          <select className="w-full bg-[#0A0B0E] border border-[#2D323A] text-sm text-[#E2E8F0] rounded-sm py-3 px-4 focus:outline-none focus:border-[#10B981] transition-colors appearance-none">
-                            <option value="">-- Select Zone --</option>
-                            <option value="Kuvempunagar">Kuvempunagar (0.75 t/d)</option>
-                            <option value="JP Nagar">JP Nagar (1.5 t/d)</option>
-                            <option value="Vijayanagar">Vijayanagar (1.3 t/d)</option>
-                            <option value="Gokulam">Gokulam (0.75 t/d)</option>
-                            <option value="All">All Zones (Combine Yields)</option>
+                          <label className="text-[10px] uppercase font-mono text-[#64748B]">Target Zone</label>
+                          <select
+                            value={companyZoneInput}
+                            onChange={(event) => setCompanyZoneInput(event.target.value)}
+                            className="w-full bg-[#0A0B0E] border border-[#2D323A] rounded-sm py-3 px-4 text-sm text-[#E2E8F0] focus:outline-none focus:border-[#10B981]"
+                          >
+                            <option value="">Select a zone</option>
+                            <option value="Kuvempunagar">Kuvempunagar</option>
+                            <option value="JP Nagar">JP Nagar</option>
+                            <option value="Vijayanagar">Vijayanagar</option>
+                            <option value="Gokulam">Gokulam</option>
+                            <option value="All">All Zones</option>
                           </select>
                         </div>
-                        
-                        <div className="pt-4 mt-auto">
-                          <button className="w-full bg-[#10B981] hover:bg-[#059669] text-[#0A0B0E] font-medium py-3 rounded-sm transition-colors flex justify-center items-center gap-2">
-                            <Gavel size={18} /> Place Bid
+
+                        <div className="space-y-1">
+                          <label className="text-[10px] uppercase font-mono text-[#64748B]">Bid Amount</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3.5 text-[#64748B] text-sm">$</span>
+                            <input
+                              value={bidAmountInput}
+                              onChange={(event) => setBidAmountInput(event.target.value)}
+                              className="w-full bg-[#0A0B0E] border border-[#2D323A] rounded-sm py-3 pl-10 pr-4 text-sm text-[#E2E8F0] focus:outline-none focus:border-[#10B981]"
+                              placeholder="0.00"
+                              type="number"
+                              min="0"
+                              step="0.01"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <button
+                            type="button"
+                            onClick={handleJoinCompany}
+                            className="w-full bg-[#1A1E26] border border-[#2D323A] text-[#E2E8F0] py-3 rounded-sm hover:border-[#10B981] transition-colors"
+                          >
+                            Join Auction
+                          </button>
+                          <button
+                            type="submit"
+                            className="w-full bg-[#10B981] text-[#0A0B0E] py-3 rounded-sm font-medium hover:bg-[#059669] transition-colors"
+                          >
+                            Place Bid
                           </button>
                         </div>
                       </form>
-                    </section>
+                    </Card>
+
+                    <Card className="p-6 border border-[#2D323A]">
+                      <div className="mb-4">
+                        <p className="text-xs uppercase tracking-[0.3em] text-[#64748B] mb-2">Admin Monitoring</p>
+                        <h3 className="text-2xl font-normal text-[#E2E8F0]">Bid Activity & Winners</h3>
+                        <p className="text-sm text-[#94A3B8] mt-3">Track which companies placed bids, how much they offered, and the current profit margins for winners.</p>
+                      </div>
+                      <div className="space-y-4">
+                        <div className="rounded-sm border border-[#2D323A] bg-[#0A0B0E] p-4">
+                          <h4 className="text-sm text-[#E2E8F0] font-medium mb-3">Bid History</h4>
+                          {bidHistory.length > 0 ? (
+                            <div className="space-y-3">
+                              {bidHistory.slice(-5).reverse().map((bid, index) => (
+                                <div key={`${bid.company}-${index}`} className="flex items-center justify-between gap-4 text-sm text-[#94A3B8]">
+                                  <span className="font-medium text-[#E2E8F0]">{bid.company}</span>
+                                  <span>${bid.amount.toFixed(2)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-sm text-[#64748B]">No bids yet. The first qualified company will appear here once they submit a bid.</p>
+                          )}
+                        </div>
+
+                        <div className="rounded-sm border border-[#2D323A] bg-[#0A0B0E] p-4">
+                          <h4 className="text-sm text-[#E2E8F0] font-medium mb-3">Winning Position</h4>
+                          {winner ? (
+                            <div className="space-y-3 text-sm text-[#94A3B8]">
+                              <p><span className="text-[#E2E8F0] font-semibold">Winner:</span> {winner.company}</p>
+                              <p><span className="text-[#E2E8F0] font-semibold">Final bid:</span> ${winner.amount.toFixed(2)}</p>
+                              <p><span className="text-[#E2E8F0] font-semibold">Profit margin:</span> ${winner.margin.toFixed(2)} ({winner.amount > 0 ? ((winner.margin / winner.amount) * 100).toFixed(1) : '0'}%)</p>
+                            </div>
+                          ) : (
+                            <p className="text-sm text-[#64748B]">No winner yet. The auction will finalize after a single unchallenged bid stands for 12 seconds, or when 100% profit is reached.</p>
+                          )}
+                        </div>
+                      </div>
+                    </Card>
                   </div>
                 </div>
 
-                {/* Footer Section */}
                 <footer className="mt-8 border-t border-[#2D323A] pt-8 flex flex-col md:flex-row justify-between items-center gap-6 pb-6">
                   <div className="flex flex-col gap-2">
                     <div className="flex items-center gap-2 text-[#E2E8F0] font-medium">
